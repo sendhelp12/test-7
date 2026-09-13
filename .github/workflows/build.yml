@@ -1,0 +1,83 @@
+# Save in your GitHub repository as .github/workflows/build.yml
+# Upload DLSS5-AIO-4x-source-patch.zip to the repository root first.
+name: Build experimental DLSS5 AIO 4x
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Verify and extract patch
+        run: |
+          $patch = 'DLSS5-AIO-4x-source-patch.zip'
+          $expected = '6cc003a6f9e691c2363fddb55d47cf765db1bdca87daf347a1ed8f9db4c79aec'
+          if ((Get-FileHash $patch -Algorithm SHA256).Hash.ToLowerInvariant() -ne $expected) {
+            throw 'Patch ZIP does not match the prepared experimental patch.'
+          }
+          Expand-Archive -LiteralPath $patch -DestinationPath patch
+      - name: Download original source and dependencies
+        run: |
+          git -c core.autocrlf=false clone --branch v2.2.4 --depth 1 --recurse-submodules https://github.com/kibblerz/DLSS5-Reshade-AIO.git source
+          if ($LASTEXITCODE -ne 0) { throw 'Source or dependency download failed.' }
+      - name: Fetch NVIDIA NGX SDK headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none --no-checkout --depth 1 https://github.com/NVIDIA/DLSS.git "$RUNNER_TEMP/dlss"
+          git -C "$RUNNER_TEMP/dlss" sparse-checkout set --no-cone '/include/**'
+          git -C "$RUNNER_TEMP/dlss" checkout
+          mkdir -p source/external/DLSS5-Feeder/external/ngx
+          find "$RUNNER_TEMP/dlss/include" -type f -name '*.h' -exec cp {} source/external/DLSS5-Feeder/external/ngx/ \;
+          test -f source/external/DLSS5-Feeder/external/ngx/nvsdk_ngx.h
+          test -f source/external/DLSS5-Feeder/external/ngx/nvsdk_ngx_params.h
+          test -f source/external/DLSS5-Feeder/external/ngx/nvsdk_ngx_defs_dlssg.h
+          ls -la source/external/DLSS5-Feeder/external/ngx
+      - name: Fetch Khronos Vulkan headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none --no-checkout --depth 1 https://github.com/KhronosGroup/Vulkan-Headers.git "$RUNNER_TEMP/vulkan-headers"
+          git -C "$RUNNER_TEMP/vulkan-headers" sparse-checkout set --no-cone '/include/vulkan/**' '/include/vk_video/**'
+          git -C "$RUNNER_TEMP/vulkan-headers" checkout
+          mkdir -p source/external/DLSS5-Feeder/external/vulkan/vulkan source/external/DLSS5-Feeder/external/vulkan/vk_video
+          cp "$RUNNER_TEMP/vulkan-headers"/include/vulkan/*.h source/external/DLSS5-Feeder/external/vulkan/vulkan/
+          cp "$RUNNER_TEMP/vulkan-headers"/include/vk_video/*.h source/external/DLSS5-Feeder/external/vulkan/vk_video/
+          test -f source/external/DLSS5-Feeder/external/vulkan/vulkan/vulkan_core.h
+          ls -la source/external/DLSS5-Feeder/external/vulkan/vulkan
+      - name: Apply patch, run checks and build x64
+        run: |
+          # Capture the child process at the OS level, including native compiler output.
+          $PSNativeCommandUseErrorActionPreference = $false
+          & cmd.exe /d /c 'pwsh.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File .\patch\DLSS5-AIO-4x-source-patch\Apply-And-Build.ps1 -SourceDirectory .\source > build.log 2>&1'
+          $buildExitCode = $LASTEXITCODE
+          if (Test-Path build.log) { Get-Content -LiteralPath build.log }
+          if ($buildExitCode -ne 0) {
+            throw "Build failed (exit code $buildExitCode). Download the build-log artifact for compiler details."
+          }
+          if (-not (Test-Path 'source/addon/build/standalone-dlssnr.addon64')) {
+            throw 'Build produced no add-on.'
+          }
+      - name: Downloadable experimental add-on
+        uses: actions/upload-artifact@v7
+        with:
+          name: DLSS5-AIO-4x-experimental-x64
+          path: source/addon/build/standalone-dlssnr.addon64
+          if-no-files-found: error
+          retention-days: 7
+      - name: Downloadable build log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
+          retention-days: 7
